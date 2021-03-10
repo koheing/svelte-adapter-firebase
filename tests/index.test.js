@@ -2,7 +2,7 @@ const test = require('ava');
 const rewire = require('rewire');
 const path = require('path');
 
-const myModule = rewire('../src/index.js');
+const myModule = rewire('../src/Cli.bs.js');
 
 const getFile = myModule.__get__('getFile');
 const validateFirebaseConfig = myModule.__get__('validateFirebaseConfig');

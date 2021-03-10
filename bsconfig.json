@@ -1,0 +1,19 @@
+{
+	"$schema": "https://raw.githubusercontent.com/rescript-lang/rescript-compiler/master/docs/docson/build-schema.json",
+	"name": "svelte-adapter-firebase",
+	"version": "0.4.0",
+	"sources": {
+		"dir": "src",
+		"subdirs": true
+	},
+	"package-specs": {
+		"module": "es6",
+		"in-source": true
+	},
+	"external-stdlib": "@rescript/std",
+	"suffix": ".bs.js",
+	"bs-dependencies": [],
+	"warnings": {
+		"error": "+101"
+	}
+}

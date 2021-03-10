@@ -1,0 +1,22 @@
+type prerenderOptions = {
+  force: bool,
+  dest: string,
+}
+
+type builder = {
+  copy_client_files: string => unit,
+  copy_server_files: string => unit,
+  copy_static_files: string => unit,
+  prerender: prerenderOptions => Js.Promise.t<unit>,
+  // log.warn etc??
+}
+
+type adapterConfig = {
+  hostingSite: option<string>,
+  sourceRewriteMatch: string,
+  firebaseJson: string,
+  cloudRunBuildDir: option<string>,
+}
+
+let adapter: (~builder: builder, ~adapterConfig: adapterConfig=?) => unit
+let default: (~builder: builder, ~adapterConfig: adapterConfig=?) => unit
