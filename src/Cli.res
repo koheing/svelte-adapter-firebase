@@ -5,10 +5,10 @@ type prerenderOptions = {
   dest: string,
 }
 type builder = {
-  copy_client_files: string => unit,
-  copy_server_files: string => unit,
-  copy_static_files: string => unit,
-  prerender: prerenderOptions => Js.Promise.t<unit>,
+  copy_client_files: (. string) => unit,
+  copy_server_files: (. string) => unit,
+  copy_static_files: (. string) => unit,
+  prerender: (. prerenderOptions) => Js.Promise.t<unit>,
   // log.warn etc??
 }
 // END: SvelteKit Builder
@@ -26,9 +26,12 @@ external readFileSync: (
 @module("path") @variadic
 external join: (~paths: array<string>) => string = "join"
 
+@module("path")
+external dirname: string => string = "dirname"
+
 @module("@sveltejs/app-utils/files")
-external copy: (~from: string, ~toDest: string, ~filter: unit => bool=?, unit) => array<string> =
-  "copy"
+external svelteKitCopy: (~from: string, ~toDest: string, ~filter: unit => bool=?, unit) => unit =
+  "copy" //array<string> = "copy"
 // END: JS FFIs
 
 let getFile = filepath => {
@@ -39,30 +42,31 @@ let getFile = filepath => {
   }
 }
 
-let getRewriteConfiguration = () => {
-
+// I do not know if there is a better way to do this. Perhaps the initial parse of the Firebase configuration should be like the bound rule below
+type siteConfig = {public: string}
+type cloudRunRewrite = {serviceId: string}
+type rewriteConfig = {
+  source: string,
+  run: option<cloudRunRewrite>,
+  function: option<string>,
 }
+@scope("JSON") @val
+external parseFirebaseRewriteRule: string => rewriteConfig = "parse"
 
-let adapter = (~builder: builder, ~adapterConfig=Js.Obj.empty(), ()) => {
-  let config = Js.Obj.assign(
-    {
-      "hostingSite": None,
-      "sourceRewriteMatch": "**",
-      "firebaseJson": "firebase.json",
-      "cloudRunBuildDir": None,
-    },
-    adapterConfig,
-  )
-  Js.log2("config", config)
-
-  let json = try Js.Json.parseExn(getFile(config["firebaseJson"])) catch {
+let getSiteConfiguration = () => {
+  // TODO: fix this
+  {public: "hello"}
+}
+let getRewriteConfiguration = (
+  firebaseJsonFilePath,
+  hostingSite,
+  sourceRewriteMatch,
+): rewriteConfig => {
+  let json = try Js.Json.parseExn(getFile(firebaseJsonFilePath)) catch {
   | _ =>
-    Js.Exn.raiseError(
-      `Error parsing Firebase Configuration ${config["firebaseJson"]}. Invalid JSON.`,
-    )
+    Js.Exn.raiseError(`Error parsing Firebase Configuration ${firebaseJsonFilePath}. Invalid JSON.`)
   }
-
-  let rewriteConfiguration = switch Js.Json.classify(json) {
+  switch Js.Json.classify(json) {
   | Js.Json.JSONObject(value) =>
     switch Js.Dict.get(value, "hosting") {
     | Some(hostingConfig) =>
@@ -72,43 +76,47 @@ let adapter = (~builder: builder, ~adapterConfig=Js.Obj.empty(), ()) => {
         // force the universally applicable "array" syntax over "object"
         // TODO attempt to perform decodeObject and error if not an object, and return single element array here
         Js.Exn.raiseError(
-          `${config["firebaseJson"]} error. Expected "hosting" property to be "array". Try wrapping your "hosting" object in an array [].`,
+          `${firebaseJsonFilePath} error. Expected "hosting" property to be "array". Try wrapping your "hosting" object in an array [].`,
         )
       }
 
-      let matchedSite = switch config["hostingSite"] {
+      let matchedSite = switch hostingSite {
       // if no hostingSite provided, assume single item array
       | None =>
-        switch Js.Array.shift(hosting) {
+        switch Js.Array2.shift(hosting) {
         | None =>
           Js.Exn.raiseError(
-            `${config["firebaseJson"]} error. "hosting.[]" is an empty array. At least one hosting site config required.`,
+            `${firebaseJsonFilePath} error. "hosting.[]" is an empty array. At least one hosting site config required.`,
           )
         | Some(hostingSite) => hostingSite
         }
       // iterate to find a match
       | Some(site) =>
-        switch Js.Array.shift(Js.Array.filteri((item, index) => {
+        switch Js.Array2.shift(
+          Js.Array2.filteri(hosting, (item, index) => {
             switch Js.Json.decodeObject(item) {
             | None =>
               Js.Exn.raiseError(
-                `${config["firebaseJson"]} error. Hosting item was not a valid JSON Object.`,
+                `${firebaseJsonFilePath} error. Hosting item was not a valid JSON Object.`,
               )
             | Some(i) =>
               switch Js.Dict.get(i, "site") {
               | None =>
                 Js.Exn.raiseError(
-                  `${config["firebaseJson"]} error. Hosting item as position ${Belt.Int.toString(
+                  `${firebaseJsonFilePath} error. Hosting item as position ${Belt.Int.toString(
                       index,
                     )} does not have required "site" field.`,
                 )
               | Some(siteConfig) => siteConfig === site
               }
             }
-          }, hosting)) {
+          }),
+        ) {
         | None =>
           Js.Exn.raiseError(
-            `${config["firebaseJson"]} error. No "hosting[].site" match for ${config["hostingSite"]}.`,
+            `${firebaseJsonFilePath} error. No "hosting[].site" match for ${Js.Json.stringify(
+                site,
+              )}.`,
           )
         | Some(hostingSite) => hostingSite
         }
@@ -117,26 +125,26 @@ let adapter = (~builder: builder, ~adapterConfig=Js.Obj.empty(), ()) => {
       switch Js.Json.decodeObject(matchedSite) {
       | None =>
         Js.Exn.raiseError(
-          `${config["firebaseJson"]} error. Hosting match is not a valid JSON object.`,
+          `${firebaseJsonFilePath} error. Hosting match is not a valid JSON object.`,
         )
       | Some(siteConfig) =>
         switch Js.Dict.get(siteConfig, "rewrites") {
         | None =>
           Js.Exn.raiseError(
-            `${config["firebaseJson"]} error. Hosting config does not have required "rewrites":[] field.`,
+            `${firebaseJsonFilePath} error. Hosting config does not have required "rewrites":[] field.`,
           )
         | Some(rewriteRules) =>
           switch Js.Json.decodeArray(rewriteRules) {
           | None =>
             Js.Exn.raiseError(
-              `${config["firebaseJson"]} error. Hosting config "rewrites":[] field is not an array.`,
+              `${firebaseJsonFilePath} error. Hosting config "rewrites":[] field is not an array.`,
             )
           | Some(rules) =>
-            switch Js.Array.findi((item, index) => {
+            switch Js.Array2.findi(rules, (item, index) => {
               switch Js.Json.decodeObject(item) {
               | None =>
                 Js.Exn.raiseError(
-                  `${config["firebaseJson"]} error. "rewrites" item at position ${Belt.Int.toString(
+                  `${firebaseJsonFilePath} error. "rewrites" item at position ${Belt.Int.toString(
                       index,
                     )} is not an object`,
                 )
@@ -144,12 +152,10 @@ let adapter = (~builder: builder, ~adapterConfig=Js.Obj.empty(), ()) => {
                 switch Js.Dict.get(rule, "source") {
                 | None =>
                   Js.Exn.raiseError(
-                    `${config["firebaseJson"]} error. Missing "source" field in rewrite rules.`,
+                    `${firebaseJsonFilePath} error. Missing "source" field in rewrite rules.`,
                   )
                 | Some(source) =>
-                  Js.log2("config.sourceRewriteMatch", config["sourceRewriteMatch"])
-                  Js.log2("source", source)
-                  config["sourceRewriteMatch"] === source &&
+                  sourceRewriteMatch === source &&
                     switch Js.Dict.get(rule, "run") {
                     | None =>
                       switch Js.Dict.get(rule, "function") {
@@ -160,57 +166,86 @@ let adapter = (~builder: builder, ~adapterConfig=Js.Obj.empty(), ()) => {
                     }
                 }
               }
-            }, rules) {
+            }) {
             | None =>
               Js.Exn.raiseError(
-                `${config["firebaseJson"]} error. No rewrites item matching "source":"${Js.Json.stringify(
-                    config["sourceRewriteMatch"],
+                `${firebaseJsonFilePath} error. No rewrites item matching "source":"${Js.Json.stringify(
+                    sourceRewriteMatch,
                   )}". The rule must contain either "function":"" or "run":{} configuration as well.`,
               )
-            | Some(rule) => rule
+            | Some(rule) => parseFirebaseRewriteRule(Js.Json.stringify(rule))
             }
           }
         }
       }
-    // Js.Dict.get(hostingConfig, "site")
-    // switch Js.Json.classify(hostingConfig) {
-    // | Js.Dict => Js.Dict.get(hostingConfig, "site") // returns the default "hosting"
-    // | Js.Json.JSONArray => hostingConfig // returns "hosting[*]" that matches hostingSite
-    // | _ =>
-    //   Js.Exn.raiseError(
-    //     `${config["firebaseJson"]} error. Expected "hosting" property to be "array" or "object."`,
-    //   )
-    // }
-    | None => Js.Exn.raiseError(`${config["firebaseJson"]} error. Expected "hosting" property.`)
+    | None => Js.Exn.raiseError(`${firebaseJsonFilePath} error. Expected "hosting" property.`)
     }
   | _ =>
-    Js.Exn.raiseError(`${config["firebaseJson"]} error. Expected root level JSON to be an object.`)
+    Js.Exn.raiseError(`${firebaseJsonFilePath} error. Expected root level JSON to be an object.`)
   }
-
-  Js.log2("rewriteConfiguration", rewriteConfiguration)
-
-  // Js.log2("builder>", builder)
-  // Js.log2("firebase config>", config)
-  // Js.log2("firebase json>", json)
-  // Js.log(copy)
-  // Js.Promise.make((~resolve, ~reject) => resolve(. 2))
 }
 
-// adapter function needs to be the default export
-let default = adapter
+let adapt = (~builder: builder, ~adapterConfig=Js.Obj.empty(), ()) => {
+  let config = Js.Obj.assign(
+    {
+      "cloudRunBuildDir": None,
+      "firebaseJson": "firebase.json",
+      "hostingSite": None,
+      "sourceRewriteMatch": "**",
+    },
+    adapterConfig,
+  )
 
-// %%raw(`
-// async function adapter(builder, {
-// 	hostingSite = null,
-// 	sourceRewriteMatch = '**',
-// 	firebaseJson = 'firebase.json',
-// 	cloudRunBuildDir = null
-// } = {}) {
-// 	const firebaseConfig = validateFirebaseConfig(
-// 		firebaseJson,
-// 		hostingSite,
-// 		sourceRewriteMatch
-// 	);
+  let siteConfig: siteConfig = getSiteConfiguration()
+  let rewriteConfiguration = getRewriteConfiguration(
+    config["firebaseJson"],
+    config["hostingSite"],
+    config["sourceRewriteMatch"],
+  )
+
+  switch rewriteConfiguration.run {
+  | Some(run) =>
+    Js.log2("Cloud Run configuration", run)
+    let serverOutputDir = switch config["cloudRunBuildDir"] {
+    | None => join(~paths=[run.serviceId])
+    | Some(dir) => join(~paths=[dir])
+    }
+
+    // TODO: use builder.log.warn instead
+    Js.log(`Writing Cloud Run service to ./${serverOutputDir}`)
+    builder.copy_server_files(. serverOutputDir)
+
+    // TODO: improve __dirname usage
+    let dirname = switch %external(__dirname) {
+    | Some(dirname) => dirname
+    | None => Js.Exn.raiseError("FATAL")
+    }
+    svelteKitCopy(~from=join(~paths=[dirname, "./files"]), ~toDest=serverOutputDir, ())
+    // TODO: use builder.log.warn instead
+    Js.log(
+      `To deploy your Cloud Run service, run this command:
++--------------------------------------------------+
+gcloud beta run --platform managed --region us-central1 deploy ${run.serviceId} --source ${serverOutputDir} --allow-unauthenticated
++--------------------------------------------------+`,
+    )
+
+  | None => // TODO: Cloud Function here, if no Cloud Function or Cloud Run hard-error
+    ()
+  }
+
+  let staticOutputDir = join(~paths=[siteConfig.public])
+  // TODO: use builder.log.warn instead
+  Js.log(`Writing client application to ${staticOutputDir}`)
+  builder.copy_static_files(. staticOutputDir)
+  builder.copy_client_files(. staticOutputDir)
+  // TODO: use builder.log.warn instead
+  Js.log(`Prerendering static pages to ${staticOutputDir}`)
+  builder.prerender(. {force: false, dest: staticOutputDir})
+}
+
+// adapter function needs to be the default
+// TODO: update sig to new adapter API
+let default = adapt
 
 // 	// @ this point Joi has validated that all required values are in the config file
 // 	const firebaseSiteConfig =
@@ -220,29 +255,3 @@ let default = adapter
 // 	const firebaseRewriteConfig = firebaseSiteConfig.rewrites.find(item => {
 // 		return item.source === sourceRewriteMatch && (item.function || item.run);
 // 	});
-
-// 	if (firebaseRewriteConfig.run) {
-// 		const serverOutputDir = Path.join(
-// 			cloudRunBuildDir || '.'+firebaseRewriteConfig.run.serviceId
-// 		);
-
-// 		builder.log.minor('Writing Cloud Run service to ./'+serverOutputDir);
-// 		builder.copy_server_files(serverOutputDir);
-// 		copy(Path.join(__dirname, './files'), serverOutputDir);
-// 		builder.log.warn(
-// 			'To deploy your Cloud Run service, run this command:'
-// 			+ '+--------------------------------------------------+'
-// 			+ 'gcloud beta run --platform managed --region us-central1 deploy '
-// 			+ firebaseRewriteConfig.run.serviceId
-// 			+ ' --source '
-// 			+ serverOutputDir
-// 			+ ' --allow-unauthenticated'
-// 			+ '+--------------------------------------------------+'
-// 		);
-// 	} else {
-// 		throw new Error(
-// 			'This code path should be unreachable, please open an issue @ https://github.com/jthegedus/svelte-adatper-firebase/issues with debug information'
-// 		);
-// 	}
-// }
-// `)
